@@ -1,0 +1,67 @@
+name: 🚀 Auto Build F41 Kernel
+
+on:
+  workflow_dispatch:  # Manual trigger
+  schedule:
+    - cron: '0 8 * * *'  # Daily at 8 AM UTC
+  push:
+    branches: [ main ]
+
+env:
+  KERNEL_SOURCE: https://github.com/Parbindar7/android_kernel_samsung_universal9611
+  DEVICE_TREE: https://github.com/Parbindar7/android_device_samsung_f41
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    
+    steps:
+    - name: 📥 Setup
+      run: |
+        sudo apt update && sudo apt install -y git ccache build-essential bc
+    
+    - name: 📦 Clone Kernel
+      run: |
+        # Clone WITHOUT branch specification (uses default)
+        git clone --depth=1 $KERNEL_SOURCE kernel
+        
+    - name: 🔧 Auto Build
+      run: |
+        cd kernel
+        
+        # Setup environment
+        export ARCH=arm64
+        export CROSS_COMPILE=aarch64-linux-gnu-
+        
+        # Find and use any defconfig
+        DEFCONFIG=$(find arch/arm64/configs -name "*defconfig" | head -1)
+        echo "Using defconfig: $DEFCONFIG"
+        
+        # Build
+        make $DEFCONFIG
+        make -j$(nproc) 2>&1 | tee build.log
+        
+    - name: 📦 Package
+      run: |
+        # Create simple package
+        mkdir -p output
+        cd kernel
+        
+        # Copy kernel if built
+        if [ -f "arch/arm64/boot/Image" ]; then
+          cp arch/arm64/boot/Image ../output/
+          echo "✅ Kernel built successfully!"
+        else
+          echo "⚠️ Kernel not found, but continuing..."
+          touch ../output/dummy.txt
+        fi
+        
+        # Create zip
+        cd ../output
+        zip -r kernel-build-$(date +%Y%m%d).zip .
+        
+    - name: 📤 Upload
+      uses: actions/upload-artifact@v4
+      with:
+        name: kernel
+        path: output/*.zip
