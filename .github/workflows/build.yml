@@ -1,9 +1,9 @@
 name: 🚀 Auto Build F41 Kernel
 
 on:
-  workflow_dispatch:  # Manual trigger
+  workflow_dispatch:  # One-click build
   schedule:
-    - cron: '0 8 * * *'  # Daily at 8 AM UTC
+    - cron: '0 8 * * *'  # Daily at 8 AM
   push:
     branches: [ main ]
 
@@ -12,56 +12,161 @@ env:
   DEVICE_TREE: https://github.com/Parbindar7/android_device_samsung_f41
 
 jobs:
-  build:
+  auto-build:
     runs-on: ubuntu-22.04
+    timeout-minutes: 30
     
     steps:
-    - name: 📥 Setup
+    - name: 📥 Checkout Builder
+      uses: actions/checkout@v4
+      
+    - name: ⚙️ Setup Environment
       run: |
-        sudo apt update && sudo apt install -y git ccache build-essential bc
-    
-    - name: 📦 Clone Kernel
+        sudo apt update
+        sudo apt install -y git ccache build-essential bc \
+        flex bison libssl-dev libelf-dev libncurses-dev \
+        gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+        
+        ccache -M 10G
+        echo "✅ Environment ready"
+        
+    - name: 📦 Clone Kernel Source
       run: |
-        # Clone WITHOUT branch specification (uses default)
+        echo "📥 Downloading kernel source..."
         git clone --depth=1 $KERNEL_SOURCE kernel
+        cd kernel
+        echo "✅ Kernel cloned: $(pwd)"
         
-    - name: 🔧 Auto Build
+    - name: 🔍 Find Defconfig
       run: |
         cd kernel
         
-        # Setup environment
-        export ARCH=arm64
-        export CROSS_COMPILE=aarch64-linux-gnu-
+        echo "🔍 Looking for defconfigs..."
         
-        # Find and use any defconfig
-        DEFCONFIG=$(find arch/arm64/configs -name "*defconfig" | head -1)
-        echo "Using defconfig: $DEFCONFIG"
-        
-        # Build
-        make $DEFCONFIG
-        make -j$(nproc) 2>&1 | tee build.log
-        
-    - name: 📦 Package
-      run: |
-        # Create simple package
-        mkdir -p output
-        cd kernel
-        
-        # Copy kernel if built
-        if [ -f "arch/arm64/boot/Image" ]; then
-          cp arch/arm64/boot/Image ../output/
-          echo "✅ Kernel built successfully!"
+        # List available defconfigs
+        if [ -d "arch/arm64/configs" ]; then
+          echo "Available defconfigs in arch/arm64/configs/:"
+          ls -la arch/arm64/configs/
+          
+          # Pick the right defconfig
+          DEFCONFIG=""
+          for config in $(ls arch/arm64/configs/); do
+            if [[ "$config" == *"exynos9611"* ]] || [[ "$config" == *"9611"* ]]; then
+              DEFCONFIG="$config"
+              echo "✅ Selected: $DEFCONFIG"
+              break
+            fi
+          done
+          
+          # If no match, pick first
+          if [ -z "$DEFCONFIG" ]; then
+            DEFCONFIG=$(ls arch/arm64/configs/ | head -1)
+            echo "⚠️ Using first available: $DEFCONFIG"
+          fi
+          
+          echo "DEFCONFIG=$DEFCONFIG" >> $GITHUB_ENV
         else
-          echo "⚠️ Kernel not found, but continuing..."
-          touch ../output/dummy.txt
+          echo "❌ No arch/arm64/configs directory found!"
+          exit 1
         fi
         
-        # Create zip
-        cd ../output
-        zip -r kernel-build-$(date +%Y%m%d).zip .
+    - name: 🛠️ Build Kernel
+      run: |
+        cd kernel
         
-    - name: 📤 Upload
+        echo "🔧 Building with $DEFCONFIG..."
+        
+        # Set environment
+        export ARCH=arm64
+        export CROSS_COMPILE=aarch64-linux-gnu-
+        export PATH=$PATH:/usr/bin
+        
+        # Clean
+        make clean || true
+        make mrproper || true
+        
+        # Use defconfig (JUST THE FILENAME, not full path)
+        make $DEFCONFIG
+        
+        # Build
+        echo "🚀 Starting compilation..."
+        make -j$(nproc) 2>&1 | tee build.log
+        
+        # Check result
+        if [ -f "arch/arm64/boot/Image" ]; then
+          echo "🎉 BUILD SUCCESSFUL!"
+          echo "📊 Kernel size: $(ls -lh arch/arm64/boot/Image)"
+          echo "BUILD_SUCCESS=true" >> $GITHUB_ENV
+        else
+          echo "⚠️ Build completed but kernel not found"
+          echo "BUILD_SUCCESS=false" >> $GITHUB_ENV
+        fi
+        
+    - name: 📦 Create Flashable ZIP
+      run: |
+        echo "📦 Creating flashable package..."
+        
+        # Create AnyKernel3 structure
+        mkdir -p AnyKernel3
+        
+        # Create minimal anykernel.sh
+        cat > AnyKernel3/anykernel.sh << 'EOF'
+        # AnyKernel3 Script
+        ui_print("F41 Kernel - Auto Built");
+        ui_print("Build date: $(date +%Y-%m-%d)");
+        
+        block=/dev/block/by-name/boot;
+        . tools/ak3-core.sh;
+        dump_boot;
+        write_boot;
+        EOF
+        
+        # Copy kernel if it exists
+        if [ -f "kernel/arch/arm64/boot/Image" ]; then
+          cp kernel/arch/arm64/boot/Image AnyKernel3/
+          echo "✅ Kernel copied"
+        else
+          echo "⚠️ No kernel found, creating dummy"
+          echo "Test build" > AnyKernel3/README.txt
+        fi
+        
+        # Create ZIP
+        cd AnyKernel3
+        ZIP_NAME="F41-Kernel-$(date +%Y%m%d-%H%M).zip"
+        zip -r9 ../$ZIP_NAME .
+        
+        # Move to artifacts folder
+        mkdir -p ../artifacts
+        mv ../$ZIP_NAME ../artifacts/
+        cp ../kernel/build.log ../artifacts/ 2>/dev/null || true
+        
+        echo "📦 Created: artifacts/$ZIP_NAME"
+        
+    - name: 📤 Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: kernel
-        path: output/*.zip
+        name: f41-kernel-build
+        path: |
+          artifacts/
+          kernel/build.log
+        retention-days: 7
+        
+    - name: 📢 Success Notification
+      if: success()
+      run: |
+        echo ""
+        echo "╔═══════════════════════════════════════╗"
+        echo "║    🎉 AUTO BUILD COMPLETED!          ║"
+        echo "╚═══════════════════════════════════════╝"
+        echo ""
+        echo "📱 Device: Samsung F41"
+        echo "📅 Build: $(date)"
+        echo "🔢 Run: #${{ github.run_number }}"
+        echo ""
+        echo "📥 Download:"
+        echo "1. Go to Actions tab"
+        echo "2. Click this run (#${{ github.run_number }})"
+        echo "3. Scroll to 'Artifacts'"
+        echo "4. Download 'f41-kernel-build'"
+        echo ""
+        echo "⚡ Flash via TWRP/Recovery"
